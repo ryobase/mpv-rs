@@ -80,7 +80,13 @@ macro_rules! mpv_cstr_to_str {
 #[cfg(not(unix))]
 macro_rules! mpv_cstr_to_str {
     ($cstr: expr) => {
-        str::from_utf8(std::ffi::CStr::from_ptr($cstr).to_bytes())
+        if let Ok(v) = std::str::from_utf8(std::ffi::CStr::from_ptr($cstr).to_bytes()) {
+            // Not sure why the type isn't inferred
+            let r: Result<&str> = Ok(v);
+            r
+        } else {
+            Err(Error::InvalidUtf8)
+        }
     };
 }
 
