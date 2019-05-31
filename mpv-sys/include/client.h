@@ -107,8 +107,9 @@ extern "C" {
  * careful not accidentally interpret the mpv_event->reply_userdata if an
  * event is not a reply. (For non-replies, this field is set to 0.)
  *
- * Currently, asynchronous calls are always strictly ordered (even with
- * synchronous calls) for each client, although that may change in the future.
+ * Asynchronous calls may be reordered in arbitrarily with other synchronous
+ * and asynchronous calls. If you want a guaranteed order, you need to wait
+ * until asynchronous calls report completion before doing the next call.
  *
  * Multithreading
  * --------------
@@ -195,6 +196,18 @@ extern "C" {
  * or change the underlying datatypes. It might be a good idea to prefer
  * MPV_FORMAT_STRING over other types to decouple your code from potential
  * mpv changes.
+ *
+ * Future changes
+ * --------------
+ *
+ * This are the planned changes that will most likely be done on the next major
+ * bump of the library:
+ *
+ *  - remove all symbols and include files that are marked as deprecated
+ *  - reassign enum numerical values to remove gaps
+ *  - remove the mpv_opengl_init_params.extra_exts field
+ *  - change the type of mpv_event_end_file.reason
+ *  - disabling all events by default
  */
 
 /**
@@ -210,7 +223,7 @@ extern "C" {
  * relational operators (<, >, <=, >=).
  */
 #define MPV_MAKE_VERSION(major, minor) (((major) << 16) | (minor) | 0UL)
-#define MPV_CLIENT_API_VERSION MPV_MAKE_VERSION(1, 100)
+#define MPV_CLIENT_API_VERSION MPV_MAKE_VERSION(1, 103)
 
 /**
  * The API user is allowed to "#define MPV_ENABLE_DEPRECATED 0" before
@@ -614,6 +627,8 @@ void mpv_resume(mpv_handle *ctx);
  *
  * Unlike other libmpv APIs, this can be called at absolutely any time (even
  * within wakeup callbacks), as long as the context is valid.
+ *
+ * Safe to be called from mpv render API threads.
  */
 int64_t mpv_get_time_us(mpv_handle *ctx);
 
@@ -926,10 +941,25 @@ int mpv_command(mpv_handle *ctx, const char **args);
  *
  * Does not use OSD and string expansion by default.
  *
- * @param[in] args mpv_node with format set to MPV_FORMAT_NODE_ARRAY; each entry
- *                 is an argument using an arbitrary format (the format must be
- *                 compatible to the used command). Usually, the first item is
- *                 the command name (as MPV_FORMAT_STRING).
+ * The args argument can have one of the following formats:
+ *
+ * MPV_FORMAT_NODE_ARRAY:
+ *      Positional arguments. Each entry is an argument using an arbitrary
+ *      format (the format must be compatible to the used command). Usually,
+ *      the first item is the command name (as MPV_FORMAT_STRING). The order
+ *      of arguments is as documented in each command description.
+ *
+ * MPV_FORMAT_NODE_MAP:
+ *      Named arguments. This requires at least an entry with the key "name"
+ *      to be present, which must be a string, and contains the command name.
+ *      The special entry "_flags" is optional, and if present, must be an
+ *      array of strings, each being a command prefix to apply. All other
+ *      entries are interpreted as arguments. They must use the argument names
+ *      as documented in each command description. Some commands do not
+ *      support named arguments at all, and must use MPV_FORMAT_NODE_ARRAY.
+ *
+ * @param[in] args mpv_node with format set to one of the values documented
+ *                 above (see there for details)
  * @param[out] result Optional, pass NULL if unused. If not NULL, and if the
  *                    function succeeds, this is set to command-specific return
  *                    data. You must call mpv_free_node_contents() to free it
@@ -952,12 +982,11 @@ int mpv_command_string(mpv_handle *ctx, const char *args);
  * Same as mpv_command, but run the command asynchronously.
  *
  * Commands are executed asynchronously. You will receive a
- * MPV_EVENT_COMMAND_REPLY event. (This event will also have an
- * error code set if running the command failed.)
+ * MPV_EVENT_COMMAND_REPLY event. This event will also have an
+ * error code set if running the command failed. For commands that
+ * return data, the data is put into mpv_event_command.result.
  *
- * This has nothing to do with the "async" command prefix, although they might
- * be unified in the future. For now, calling this API means that the command
- * will be synchronously executed on the core, without blocking the API user.
+ * Safe to be called from mpv render API threads.
  *
  * @param reply_userdata the value mpv_event.reply_userdata of the reply will
  *                       be set to (see section about asynchronous calls)
@@ -972,8 +1001,9 @@ int mpv_command_async(mpv_handle *ctx, uint64_t reply_userdata,
  * function is to mpv_command_node() what mpv_command_async() is to
  * mpv_command().
  *
- * See mpv_command_async() for details. Retrieving the result is not
- * supported yet.
+ * See mpv_command_async() for details.
+ *
+ * Safe to be called from mpv render API threads.
  *
  * @param reply_userdata the value mpv_event.reply_userdata of the reply will
  *                       be set to (see section about asynchronous calls)
@@ -982,6 +1012,38 @@ int mpv_command_async(mpv_handle *ctx, uint64_t reply_userdata,
  */
 int mpv_command_node_async(mpv_handle *ctx, uint64_t reply_userdata,
                            mpv_node *args);
+
+/**
+ * Signal to all async requests with the matching ID to abort. This affects
+ * the following API calls:
+ *
+ *      mpv_command_async
+ *      mpv_command_node_async
+ *
+ * All of these functions take a reply_userdata parameter. This API function
+ * tells all requests with the matching reply_userdata value to try to return
+ * as soon as possible. If there are multiple requests with matching ID, it
+ * aborts all of them.
+ *
+ * This API function is mostly asynchronous itself. It will not wait until the
+ * command is aborted. Instead, the command will terminate as usual, but with
+ * some work not done. How this is signaled depends on the specific command (for
+ * example, the "subprocess" command will indicate it by "killed_by_us" set to
+ * true in the result). How long it takes also depends on the situation. The
+ * aborting process is completely asynchronous.
+ *
+ * Not all commands may support this functionality. In this case, this function
+ * will have no effect. The same is true if the request using the passed
+ * reply_userdata has already terminated, has not been started yet, or was
+ * never in use at all.
+ *
+ * You have to be careful of race conditions: the time during which the abort
+ * request will be effective is _after_ e.g. mpv_command_async() has returned,
+ * and before the command has signaled completion with MPV_EVENT_COMMAND_REPLY.
+ *
+ * @param reply_userdata ID of the request to be aborted (see above)
+ */
+void mpv_abort_async_command(mpv_handle *ctx, uint64_t reply_userdata);
 
 /**
  * Set a property to a given value. Properties are essentially variables which
@@ -1029,6 +1091,8 @@ int mpv_set_property_string(mpv_handle *ctx, const char *name, const char *data)
  * as MPV_EVENT_SET_PROPERTY_REPLY event. The mpv_event.error field will contain
  * the result status of the operation. Otherwise, this function is similar to
  * mpv_set_property().
+ *
+ * Safe to be called from mpv render API threads.
  *
  * @param reply_userdata see section about asynchronous calls
  * @param name The property name.
@@ -1090,6 +1154,8 @@ char *mpv_get_property_osd_string(mpv_handle *ctx, const char *name);
  * as well as the property data with the MPV_EVENT_GET_PROPERTY_REPLY event.
  * You should check the mpv_event.error field on the reply event.
  *
+ * Safe to be called from mpv render API threads.
+ *
  * @param reply_userdata see section about asynchronous calls
  * @param name The property name.
  * @param format see enum mpv_format.
@@ -1136,6 +1202,8 @@ int mpv_get_property_async(mpv_handle *ctx, uint64_t reply_userdata,
  * Only the mpv_handle on which this was called will receive the property
  * change events, or can unobserve them.
  *
+ * Safe to be called from mpv render API threads.
+ *
  * @param reply_userdata This will be used for the mpv_event.reply_userdata
  *                       field for the received MPV_EVENT_PROPERTY_CHANGE
  *                       events. (Also see section about asynchronous calls,
@@ -1154,6 +1222,8 @@ int mpv_observe_property(mpv_handle *mpv, uint64_t reply_userdata,
 /**
  * Undo mpv_observe_property(). This will remove all observed properties for
  * which the given number was passed as reply_userdata to mpv_observe_property.
+ *
+ * Safe to be called from mpv render API threads.
  *
  * @param registered_reply_userdata ID that was passed to mpv_observe_property
  * @return negative value is an error code, >=0 is number of removed properties
@@ -1188,7 +1258,8 @@ typedef enum mpv_event_id {
      */
     MPV_EVENT_SET_PROPERTY_REPLY = 4,
     /**
-     * Reply to a mpv_command_async() request.
+     * Reply to a mpv_command_async() or mpv_command_node_async() request.
+     * See also mpv_event and mpv_event_command.
      */
     MPV_EVENT_COMMAND_REPLY     = 5,
     /**
@@ -1535,6 +1606,17 @@ typedef struct mpv_event_hook {
     uint64_t id;
 } mpv_event_hook;
 
+// Since API version 1.102.
+typedef struct mpv_event_command {
+    /**
+     * Result data of the command. Note that success/failure is signaled
+     * separately via mpv_event.error. This field is only for result data
+     * in case of success. Most commands leave it at MPV_FORMAT_NONE. Set
+     * to MPV_FORMAT_NONE on failure.
+     */
+    mpv_node result;
+} mpv_event_command;
+
 typedef struct mpv_event {
     /**
      * One of mpv_event. Keep in mind that later ABI compatible releases might
@@ -1561,6 +1643,7 @@ typedef struct mpv_event {
      *  MPV_EVENT_SET_PROPERTY_REPLY
      *  MPV_EVENT_COMMAND_REPLY
      *  MPV_EVENT_PROPERTY_CHANGE
+     *  MPV_EVENT_HOOK
      */
     uint64_t reply_userdata;
     /**
@@ -1570,6 +1653,8 @@ typedef struct mpv_event {
      *  MPV_EVENT_LOG_MESSAGE:            mpv_event_log_message*
      *  MPV_EVENT_CLIENT_MESSAGE:         mpv_event_client_message*
      *  MPV_EVENT_END_FILE:               mpv_event_end_file*
+     *  MPV_EVENT_HOOK:                   mpv_event_hook*
+     *  MPV_EVENT_COMMAND_REPLY*          mpv_event_command*
      *  other: NULL
      *
      * Note: future enhancements might add new event structs for existing or new
@@ -1585,6 +1670,8 @@ typedef struct mpv_event {
  *
  * (Informational note: currently, all events are enabled by default, except
  *  MPV_EVENT_TICK.)
+ *
+ * Safe to be called from mpv render API threads.
  *
  * @param event See enum mpv_event_id.
  * @param enable 1 to enable receiving this event, 0 to disable it.
@@ -1625,6 +1712,9 @@ int mpv_request_log_messages(mpv_handle *ctx, const char *min_level);
  * function internally calls mpv_wait_event(). Additionally, concurrent calls
  * to different mpv_handles are always safe.
  *
+ * As long as the timeout is 0, this is safe to be called from mpv render API
+ * threads.
+ *
  * @param timeout Timeout in seconds, after which the function returns even if
  *                no event was received. A MPV_EVENT_NONE is returned on
  *                timeout. A value of 0 will disable waiting. Negative values
@@ -1648,6 +1738,8 @@ mpv_event *mpv_wait_event(mpv_handle *ctx, double timeout);
  * this call. But note that this dummy event might be skipped if there are
  * already other events queued. All what counts is that the waiting thread
  * is woken up at all.
+ *
+ * Safe to be called from mpv render API threads.
  */
 void mpv_wakeup(mpv_handle *ctx);
 

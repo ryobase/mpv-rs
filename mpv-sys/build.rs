@@ -22,25 +22,16 @@ extern crate bindgen;
 use std::env;
 use std::path::PathBuf;
 
-#[cfg(not(feature = "bindgen"))]
-fn main() {
-    let out_path = PathBuf::from(env::var("OUT_DIR").unwrap());
-    let crate_path = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
-    ::std::fs::copy(
-        crate_path.join("pregenerated_bindings.rs"),
-        out_path.join("bindings.rs"),
-    )
-    .expect("Couldn't find pregenerated bindings!");
-
-    println!("cargo:rustc-link-lib=mpv");
-}
-
 #[cfg(feature = "bindgen")]
 fn main() {
+	println!("cargo:rustc-link-search=../../third_party/");
+	println!("cargo:rustc-link-lib=mpv");
+
     let bindings = bindgen::Builder::default()
         .header("include/client.h")
         .header("include/render.h")
         .header("include/stream_cb.h")
+        .header("include/render_gl.h")
         .blacklist_type("max_align_t")
         .opaque_type("mpv_handle")
         .opaque_type("mpv_render_context")
@@ -50,9 +41,19 @@ fn main() {
         .expect("Unable to generate bindings");
 
     let out_path = PathBuf::from(env::var("OUT_DIR").unwrap());
-    bindings
-        .write_to_file(out_path.join("bindings.rs"))
-        .expect("Couldn't write bindings!");
+    bindings.write_to_file(out_path.join("bindings.rs")).expect("Couldn't write bindings!");
+}
 
-    println!("cargo:rustc-link-lib=mpv");
+#[cfg(not(feature = "bindgen"))]
+fn main() {
+    println!("cargo:rustc-link-search=../../third_party/");
+	println!("cargo:rustc-link-lib=mpv");
+
+    let out_path = PathBuf::from(env::var("OUT_DIR").unwrap());
+    let crate_path = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
+    ::std::fs::copy(
+        crate_path.join("pregenerated_bindings.rs"),
+        out_path.join("bindings.rs"),
+    )
+    .expect("Couldn't find pregenerated bindings!");
 }
