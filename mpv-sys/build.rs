@@ -24,7 +24,8 @@ use std::path::PathBuf;
 
 #[cfg(feature = "bindgen")]
 fn main() {
-	println!("cargo:rustc-link-search=../../third_party/");
+    let source = env::var("MPV_SOURCE").expect("env var `MPV_SOURCE` not set");
+	// println!("cargo:rustc-link-search=../../third_party/");
 	println!("cargo:rustc-link-lib=mpv");
 
     let bindings = bindgen::Builder::default()
@@ -46,7 +47,9 @@ fn main() {
 
 #[cfg(not(feature = "bindgen"))]
 fn main() {
-    println!("cargo:rustc-link-search=../../third_party/");
+    let source = env::var("MPV_SOURCE").expect("env var `MPV_SOURCE` not set");
+    println!("cargo:rustc-link-search={}/", source);
+    // println!("cargo:rustc-link-search=../../third_party/");
 	println!("cargo:rustc-link-lib=mpv");
 
     let out_path = PathBuf::from(env::var("OUT_DIR").unwrap());
